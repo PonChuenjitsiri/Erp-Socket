@@ -1,36 +1,94 @@
 import { EnqueueQueued, EnqueueResponse, PreviewResult, StatusPayload } from "../types/upload_bom_preview_type";
 
 const API_BASE =
-    process.env.NEXT_PUBLIC_FRAPPE_BASE_URL?.replace(/\/$/, "") || ""; 
+  process.env.NEXT_PUBLIC_FRAPPE_BASE_URL?.replace(/\/$/, "") || "";
 
 const TOKEN_ENDPOINT =
-    API_BASE + "/api/method/frappe.sessions.get_csrf_token";
+  API_BASE + "/api/method/frappe.sessions.get_csrf_token";
 
 const ENQUEUE_ENDPOINT =
-    API_BASE + "/api/method/rbiiot.api.import_bom_api.handle_file_preview";
+  API_BASE + "/api/method/rbiiot.api.import_bom_api.handle_file_preview";
 
+
+// export function normalizePayload(raw: any, jobId: string): StatusPayload {
+//     const inner = raw?.message ?? raw;  
+
+//     const looksLikeResult =
+//         inner && typeof inner === "object" &&
+//         "rubber_validation" in inner &&
+//         "steel_validation" in inner &&
+//         "rm_validation" in inner &&
+//         "prod_validation" in inner;
+
+//     if (looksLikeResult) {
+//         return { job_id: jobId, status: "finished", progress: 100, result: inner as PreviewResult };
+//     }
+
+//     const valid = new Set(["queued", "running", "finished", "error", "unknown"]);
+//     if (inner && typeof inner === "object" && valid.has(inner.status)) {
+//         return { job_id: inner.job_id || jobId, ...inner };
+//     }
+
+//     return { job_id: jobId, status: "unknown" };
+// }
+
+type JobStatus = "queued" | "running" | "finished" | "error" | "unknown";
+
+function tryParseJSON(s: any) {
+  if (typeof s !== "string") return s;
+  try { return JSON.parse(s); } catch { return s; }
+}
 
 export function normalizePayload(raw: any, jobId: string): StatusPayload {
-    const inner = raw?.message ?? raw;  
-
-    const looksLikeResult =
-        inner && typeof inner === "object" &&
-        "rubber_validation" in inner &&
-        "steel_validation" in inner &&
-        "rm_validation" in inner &&
-        "prod_validation" in inner;
-
-    if (looksLikeResult) {
-        return { job_id: jobId, status: "finished", progress: 100, result: inner as PreviewResult };
+  // unwrap only if message is an object envelope (e.g., HTTP {message:{...}})
+  let inner: any = raw;
+  if (raw && typeof raw === "object" && "message" in raw) {
+    const m = (raw as any).message;
+    if (m && typeof m === "object") {
+      inner = m;          // HTTP envelope
+    } else {
+      inner = raw;        // socket payload that has message:string — do NOT unwrap
     }
+  }
 
-    const valid = new Set(["queued", "running", "finished", "error", "unknown"]);
-    if (inner && typeof inner === "object" && valid.has(inner.status)) {
-        return { job_id: inner.job_id || jobId, ...inner };
-    }
+  // detect import/preview final result
+  const looksLikeImport =
+    inner && typeof inner === "object" &&
+    ("created_items" in inner || "updated_items" in inner || "created_boms" in inner || inner?.status === "success");
 
-    return { job_id: jobId, status: "unknown" };
+  if (looksLikeImport) {
+    return { job_id: jobId, status: "finished", progress: 100, result: inner as any };
+  }
+
+  const looksLikePreview =
+    inner && typeof inner === "object" &&
+    "rubber_validation" in inner && "steel_validation" in inner &&
+    "rm_validation" in inner && "prod_validation" in inner;
+
+  if (looksLikePreview) {
+    return { job_id: jobId, status: "finished", progress: 100, result: inner as any };
+  }
+
+  // normalize running/queued/error
+  if (inner && typeof inner === "object") {
+    const status = (inner.status ?? inner.state ?? "unknown").toString().trim().toLowerCase();
+    let progress: number | undefined = inner.progress ?? inner.percent;
+    if (typeof progress === "string") progress = Number(progress);
+    if (typeof progress === "number") progress = Math.max(0, Math.min(100, Math.round(progress)));
+    else if (status === "finished") progress = 100;
+
+    return {
+      job_id: inner.job_id ?? jobId,
+      status: (["queued", "running", "finished", "error", "unknown"].includes(status) ? status : "unknown") as any,
+      progress,
+      stage: inner.stage,
+      message: typeof inner.message === "string" ? inner.message : undefined,
+    };
+  }
+
+  return { job_id: jobId, status: "unknown" };
 }
+
 
 
 
